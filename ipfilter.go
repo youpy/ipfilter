@@ -62,6 +62,11 @@ type Options struct {
 	}
 }
 
+type IPFilterable interface {
+	Allowed(ipstr string) bool
+	TrustProxy() bool
+}
+
 type IPFilter struct {
 	opts Options
 	//mut protects the below
@@ -339,7 +344,7 @@ func (f *IPFilter) NetBlocked(ip net.IP) bool {
 //Wrap the provided handler with simple IP blocking middleware
 //using this IP filter and its configuration
 func (f *IPFilter) Wrap(next http.Handler) http.Handler {
-	return &ipFilterMiddleware{IPFilter: f, next: next}
+	return &ipFilterMiddleware{IPFilterable: f, next: next}
 }
 
 //IPToCountry returns the IP's ISO country code.
@@ -358,6 +363,11 @@ func (f *IPFilter) NetIPToCountry(ip net.IP) string {
 	db := f.db
 	f.mut.RUnlock()
 	return NetIPToCountry(db, ip)
+}
+
+//TrustProxy returns if requests from proxy is allowed
+func (f *IPFilter) TrustProxy() bool {
+	return f.opts.TrustProxy
 }
 
 //Wrap is equivalent to NewLazy(opts) then Wrap(next)
@@ -396,19 +406,24 @@ func NetIPToCountry(db *maxminddb.Reader, ip net.IP) string {
 	return r.Country.Country
 }
 
+//NewIPFilterMiddleware returns a new ipFilterMiddleware
+func NewIPFilterMiddleware(ipFilter IPFilterable, next http.Handler) *ipFilterMiddleware {
+	return &ipFilterMiddleware{ipFilter, next}
+}
+
 type ipFilterMiddleware struct {
-	*IPFilter
+	IPFilterable
 	next http.Handler
 }
 
 func (m *ipFilterMiddleware) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	var remoteIP string
-	if m.opts.TrustProxy {
+	if m.TrustProxy() {
 		remoteIP = realip.FromRequest(r)
 	} else {
 		remoteIP, _, _ = net.SplitHostPort(r.RemoteAddr)
 	}
-	if !m.IPFilter.Allowed(remoteIP) {
+	if !m.Allowed(remoteIP) {
 		//show simple forbidden text
 		http.Error(w, http.StatusText(http.StatusForbidden), http.StatusForbidden)
 		return
